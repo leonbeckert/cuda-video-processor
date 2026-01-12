@@ -1,0 +1,17 @@
+#ifndef CUDA_CHECK_H
+#define CUDA_CHECK_H
+
+#include <cuda_runtime.h>
+#include <cstdio>
+#include <cstdlib>
+
+#define CUDA_CHECK(call) do {                                  \
+    cudaError_t _e = (call);                                   \
+    if (_e != cudaSuccess) {                                   \
+        fprintf(stderr, "CUDA error %s:%d: %s\n",              \
+                __FILE__, __LINE__, cudaGetErrorString(_e));   \
+        exit(1);                                               \
+    }                                                          \
+} while (0)
+
+#endif // CUDA_CHECK_H
