@@ -126,7 +126,8 @@ void launch_sobel(
     const uint8_t* d_in,
     uint8_t* d_out,
     int width,
-    int height
+    int height,
+    cudaStream_t stream
 ) {
     dim3 block(TILE_W, TILE_H);
     dim3 grid(
@@ -134,5 +135,5 @@ void launch_sobel(
         (height + TILE_H - 1) / TILE_H
     );
 
-    sobel_tiled_rgba8_kernel<<<grid, block>>>(d_in, d_out, width, height);
+    sobel_tiled_rgba8_kernel<<<grid, block, 0, stream>>>(d_in, d_out, width, height);
 }

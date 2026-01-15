@@ -38,12 +38,13 @@ __global__ void enhance_rgba8_kernel(
 void launch_enhancement(
     uint8_t* d_img,
     int width, int height,
-    float contrast, float brightness
+    float contrast, float brightness,
+    cudaStream_t stream
 ) {
     dim3 block(16, 16);
     dim3 grid(
         (width  + block.x - 1) / block.x,
         (height + block.y - 1) / block.y
     );
-    enhance_rgba8_kernel<<<grid, block>>>(d_img, width, height, contrast, brightness);
+    enhance_rgba8_kernel<<<grid, block, 0, stream>>>(d_img, width, height, contrast, brightness);
 }
