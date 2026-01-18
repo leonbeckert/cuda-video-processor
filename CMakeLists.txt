@@ -76,6 +76,34 @@ set_target_properties(cuda-video-processor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Benchmark executable (headless — no OpenGL/GLFW/FFmpeg dependency)
+option(BUILD_BENCHMARKS "Build benchmark harness" OFF)
+if(BUILD_BENCHMARKS)
+    add_executable(benchmark
+        benchmarks/benchmark.cu
+        src/kernels/sobel.cu
+        src/kernels/enhance.cu
+        src/kernels/histogram.cu
+        src/kernels/brightness_histogram.cu
+    )
+
+    target_include_directories(benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_link_libraries(benchmark
+        CUDA::cudart
+    )
+
+    set_target_properties(benchmark PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+
+    message(STATUS "  Benchmark target enabled")
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 message(STATUS "cuda-video-processor configured")
