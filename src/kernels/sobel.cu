@@ -5,18 +5,17 @@
 
 // --- Shared memory tiling for Sobel edge detection ---
 //
-// The 3x3 Sobel stencil means each output pixel reads 8 neighbors from memory.
+// The 3x3 Sobel stencil means each output pixel reads 8 neighbors.
 // Without tiling, every thread independently fetches its 3x3 window from global
-// memory — massive redundancy since neighboring threads share most of their inputs.
+// memory — massive redundancy since neighboring threads share most inputs.
 //
 // Strategy: each thread block cooperatively loads a (TILE_W+2) x (TILE_H+2) tile
-// into shared memory, including a 1-pixel halo around the edges for the stencil.
+// of packed RGBA pixels (uint32) into shared memory, including a 1-pixel halo for
+// the stencil. All channels are loaded in ONE pass — no per-channel iteration.
 // Interior pixels then read all neighbors from shared memory (~100x lower latency
-// than global). This reduces global memory traffic from ~9 reads/pixel to ~1 read/pixel
-// for interior threads.
+// than global). This reduces global memory traffic from ~9 reads/pixel to ~1 read/pixel.
 //
-// We tile per-channel (R, G, B separately) to keep shared memory usage reasonable:
-//   18 x 18 x 1 byte = 324 bytes per channel pass, well within the 48KB limit.
+// Shared memory: 18 x 18 x 4 bytes = 1296 bytes per block (trivial vs 48KB limit).
 
 #define TILE_W 16
 #define TILE_H 16
@@ -30,96 +29,99 @@ __global__ void sobel_tiled_rgba8_kernel(
     uint8_t* __restrict__ out,
     int width, int height
 ) {
-    // Output pixel coordinates
+    // Reinterpret as uint32 for packed RGBA loads (4 bytes per pixel, one transaction)
+    const uint32_t* __restrict__ in32 = reinterpret_cast<const uint32_t*>(in);
+    uint32_t* __restrict__ out32 = reinterpret_cast<uint32_t*>(out);
+
     int x = blockIdx.x * TILE_W + threadIdx.x;
     int y = blockIdx.y * TILE_H + threadIdx.y;
 
-    int idx = (y * width + x) * 4;
-
-    // Border pixels: copy unchanged (no valid 3x3 neighborhood)
-    if (x < width && y < height) {
-        if (x == 0 || y == 0 || x == width - 1 || y == height - 1) {
-            out[idx + 0] = in[idx + 0];
-            out[idx + 1] = in[idx + 1];
-            out[idx + 2] = in[idx + 2];
-            out[idx + 3] = in[idx + 3];
-            // Don't return yet — thread still participates in shared memory loads below
-        }
-    }
-
-    // Shared memory tile: (TILE_W + 2) x (TILE_H + 2) for one channel at a time.
-    // Processing channels sequentially keeps shared memory small (324 bytes).
-    __shared__ uint8_t tile[(TILE_H + 2) * (TILE_W + 2)];
+    // Shared memory tile: (TILE_W+2) x (TILE_H+2) packed RGBA pixels
+    __shared__ uint32_t tile[(TILE_H + 2) * (TILE_W + 2)];
 
     const int tile_pitch = TILE_W + 2;
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
 
-    // Process R, G, B channels with shared memory tiling
+    // --- Cooperative tile load (single pass, all 4 channels at once) ---
+    // Each thread loads its corresponding pixel from the halo-extended region.
+    int src_x = blockIdx.x * TILE_W - 1 + tx;
+    int src_y = blockIdx.y * TILE_H - 1 + ty;
+
+    // Clamp to image bounds
+    int cx = min(max(src_x, 0), width - 1);
+    int cy = min(max(src_y, 0), height - 1);
+    tile[ty * tile_pitch + tx] = in32[cy * width + cx];
+
+    // Right halo columns (2 extra columns)
+    if (tx < 2) {
+        int hx = min(max(src_x + TILE_W, 0), width - 1);
+        tile[ty * tile_pitch + (tx + TILE_W)] = in32[cy * width + hx];
+    }
+
+    // Bottom halo rows (2 extra rows)
+    if (ty < 2) {
+        int hy = min(max(src_y + TILE_H, 0), height - 1);
+        tile[(ty + TILE_H) * tile_pitch + tx] = in32[hy * width + cx];
+    }
+
+    // Bottom-right corner (4 pixels)
+    if (tx < 2 && ty < 2) {
+        int hx = min(max(src_x + TILE_W, 0), width - 1);
+        int hy = min(max(src_y + TILE_H, 0), height - 1);
+        tile[(ty + TILE_H) * tile_pitch + (tx + TILE_W)] = in32[hy * width + hx];
+    }
+
+    __syncthreads();
+
+    if (x >= width || y >= height) return;
+
+    // Border pixels: copy unchanged
+    if (x == 0 || y == 0 || x == width - 1 || y == height - 1) {
+        out32[y * width + x] = in32[y * width + x];
+        return;
+    }
+
+    // --- Apply Sobel from shared memory ---
+    // Thread position in tile is (tx+1, ty+1) offset by halo
+    int t = (ty + 1) * tile_pitch + (tx + 1);
+
+    // Load 8 packed RGBA neighbors
+    uint32_t px00 = tile[t - tile_pitch - 1];
+    uint32_t px01 = tile[t - tile_pitch    ];
+    uint32_t px02 = tile[t - tile_pitch + 1];
+    uint32_t px10 = tile[t             - 1];
+    uint32_t px12 = tile[t             + 1];
+    uint32_t px20 = tile[t + tile_pitch - 1];
+    uint32_t px21 = tile[t + tile_pitch    ];
+    uint32_t px22 = tile[t + tile_pitch + 1];
+
+    // Process R, G, B channels from packed pixels
+    uint32_t result = 0;
     #pragma unroll
     for (int c = 0; c < 3; c++) {
-        // --- Cooperative tile load ---
-        // Each of the 16x16 = 256 threads loads one interior pixel.
-        // Halo cells (border ring) require extra loads by edge threads.
+        int shift = c * 8;
+        int p00 = (px00 >> shift) & 0xFF;
+        int p01 = (px01 >> shift) & 0xFF;
+        int p02 = (px02 >> shift) & 0xFF;
+        int p10 = (px10 >> shift) & 0xFF;
+        int p12 = (px12 >> shift) & 0xFF;
+        int p20 = (px20 >> shift) & 0xFF;
+        int p21 = (px21 >> shift) & 0xFF;
+        int p22 = (px22 >> shift) & 0xFF;
 
-        // Source coordinates for this thread's pixel in the halo-extended tile
-        int src_x = blockIdx.x * TILE_W - 1 + tx;
-        int src_y = blockIdx.y * TILE_H - 1 + ty;
+        int gx = -p00 + p02 - 2*p10 + 2*p12 - p20 + p22;
+        int gy = -p00 - 2*p01 - p02 + p20 + 2*p21 + p22;
 
-        // Clamp to image bounds
-        int cx = min(max(src_x, 0), width - 1);
-        int cy = min(max(src_y, 0), height - 1);
-        tile[ty * tile_pitch + tx] = in[(cy * width + cx) * 4 + c];
-
-        // Right halo column: threads with tx < 2 load the extra 2 columns
-        if (tx < 2) {
-            int hx = min(max(src_x + TILE_W, 0), width - 1);
-            tile[ty * tile_pitch + (tx + TILE_W)] = in[(cy * width + hx) * 4 + c];
-        }
-
-        // Bottom halo rows: threads with ty < 2 load the extra 2 rows
-        if (ty < 2) {
-            int hy = min(max(src_y + TILE_H, 0), height - 1);
-            tile[(ty + TILE_H) * tile_pitch + tx] = in[(hy * width + cx) * 4 + c];
-        }
-
-        // Bottom-right corner: thread (0,0) and (1,0), (0,1), (1,1) load corners
-        if (tx < 2 && ty < 2) {
-            int hx = min(max(src_x + TILE_W, 0), width - 1);
-            int hy = min(max(src_y + TILE_H, 0), height - 1);
-            tile[(ty + TILE_H) * tile_pitch + (tx + TILE_W)] = in[(hy * width + hx) * 4 + c];
-        }
-
-        __syncthreads();
-
-        // --- Apply Sobel from shared memory ---
-        if (x > 0 && y > 0 && x < width - 1 && y < height - 1) {
-            // Thread's position in tile is (tx+1, ty+1) — offset by halo
-            int t = (ty + 1) * tile_pitch + (tx + 1);
-
-            int p00 = tile[t - tile_pitch - 1];
-            int p01 = tile[t - tile_pitch    ];
-            int p02 = tile[t - tile_pitch + 1];
-            int p10 = tile[t             - 1];
-            int p12 = tile[t             + 1];
-            int p20 = tile[t + tile_pitch - 1];
-            int p21 = tile[t + tile_pitch    ];
-            int p22 = tile[t + tile_pitch + 1];
-
-            int gx = -p00 + p02 - 2*p10 + 2*p12 - p20 + p22;
-            int gy = -p00 - 2*p01 - p02 + p20 + 2*p21 + p22;
-
-            float mag = sqrtf(static_cast<float>(gx * gx + gy * gy));
-            out[idx + c] = sobel_clamp_u8(static_cast<int>(mag));
-        }
-
-        __syncthreads();  // Ensure tile is fully consumed before next channel overwrites it
+        float mag = sqrtf(static_cast<float>(gx * gx + gy * gy));
+        uint32_t val = sobel_clamp_u8(static_cast<int>(mag));
+        result |= (val << shift);
     }
 
-    // Alpha channel: straight copy (no filtering)
-    if (x < width && y < height) {
-        out[idx + 3] = in[idx + 3];
-    }
+    // Alpha channel: copy from input
+    result |= (tile[(ty + 1) * tile_pitch + (tx + 1)] & 0xFF000000u);
+
+    out32[y * width + x] = result;
 }
 
 void launch_sobel(

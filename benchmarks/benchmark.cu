@@ -290,6 +290,19 @@ static BenchResult run_inplace_benchmark(
 // ============================================================
 // Hardware info
 // ============================================================
+
+// Peak bandwidth from manufacturer spec (not computed from clock rates,
+// which may be unavailable in newer CUDA toolkit versions)
+static float spec_peak_bandwidth(const char* gpu_name) {
+    if (strstr(gpu_name, "4090")) return 1008.0f;   // RTX 4090: 1008 GB/s
+    if (strstr(gpu_name, "3090")) return 936.0f;     // RTX 3090: 936 GB/s
+    if (strstr(gpu_name, "4080")) return 716.8f;
+    if (strstr(gpu_name, "3080")) return 760.0f;
+    if (strstr(gpu_name, "A100")) return 2039.0f;
+    if (strstr(gpu_name, "H100")) return 3350.0f;
+    return 500.0f;  // conservative fallback
+}
+
 static void print_hardware_info(int device) {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
@@ -298,21 +311,24 @@ static void print_hardware_info(int device) {
     CUDA_CHECK(cudaRuntimeGetVersion(&runtime_ver));
     CUDA_CHECK(cudaDriverGetVersion(&driver_ver));
 
-    // Peak bandwidth: memoryClockRate (kHz) * memoryBusWidth (bits) * 2 (DDR) / 8 / 1e6
-    float peak_bw = (float)prop.memoryClockRate * 1e3f * (prop.memoryBusWidth / 8) * 2.0f / 1e9f;
+    float peak_bw = spec_peak_bandwidth(prop.name);
+
+    // Query memory clock via attribute API (survives cudaDeviceProp changes)
+    int mem_clock_khz = 0;
+    cudaDeviceGetAttribute(&mem_clock_khz, cudaDevAttrMemoryClockRate, device);
 
     printf("## Hardware Info\n\n");
     printf("| Property | Value |\n");
     printf("|----------|-------|\n");
     printf("| GPU | %s |\n", prop.name);
-    printf("| CUDA Cores | %d |\n", prop.multiProcessorCount * 128); // approximate
-    printf("| Memory | %.0f MB GDDR%s |\n", prop.totalGlobalMem / 1048576.0f,
-           prop.memoryBusWidth == 384 ? "6X" : "6X");
-    printf("| Memory Bus | %d-bit |\n", prop.memoryBusWidth);
-    printf("| Memory Clock | %d MHz |\n", prop.memoryClockRate / 1000);
-    printf("| L2 Cache | %.0f MB |\n", prop.l2CacheSize / 1048576.0f);
-    printf("| Peak Memory BW (spec) | %.0f GB/s |\n", peak_bw);
     printf("| SM Count | %d |\n", prop.multiProcessorCount);
+    printf("| Memory | %.0f MB |\n", prop.totalGlobalMem / 1048576.0f);
+    printf("| Memory Bus | %d-bit |\n", prop.memoryBusWidth);
+    if (mem_clock_khz > 0) {
+        printf("| Memory Clock | %d MHz |\n", mem_clock_khz / 1000);
+    }
+    printf("| L2 Cache | %.1f MB |\n", prop.l2CacheSize / 1048576.0f);
+    printf("| Peak Memory BW (spec) | %.0f GB/s |\n", peak_bw);
     printf("| CUDA Runtime | %d.%d |\n", runtime_ver / 1000, (runtime_ver % 1000) / 10);
     printf("| CUDA Driver | %d.%d |\n", driver_ver / 1000, (driver_ver % 1000) / 10);
     printf("| Compute Capability | %d.%d |\n", prop.major, prop.minor);
@@ -322,7 +338,7 @@ static void print_hardware_info(int device) {
 static float get_peak_bandwidth(int device) {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
-    return (float)prop.memoryClockRate * 1e3f * (prop.memoryBusWidth / 8) * 2.0f / 1e9f;
+    return spec_peak_bandwidth(prop.name);
 }
 
 // ============================================================
@@ -501,16 +517,11 @@ int main(int argc, char** argv) {
     // ============================================================
     printf("Running per-kernel benchmarks (20 warmup, 100 timed, L2 flush between)...\n\n");
 
-    // Sobel data sizes: reads ~9 neighbors per pixel across 3 channels from input, writes full frame
-    // Naive: reads = frame_bytes * ~3 (each of 3 channels reads 8 neighbors + center from global)
-    // But effective is: frame_bytes read + frame_bytes written (minimum data touched)
-    // For bandwidth calculation, use actual data touched: 1 frame read + 1 frame write
-    size_t sobel_bytes_rw = frame_bytes + frame_bytes;  // input + output
-
-    // Enhancement: reads and writes same frame (in-place)
-    size_t enhance_bytes_rw = frame_bytes + frame_bytes;  // read + write (in-place counts both)
-
-    // Histogram: reads input frame, negligible write
+    // Effective bandwidth calculation uses minimum data touched (not redundant reads):
+    //   Sobel: 1 frame read + 1 frame write = 2 * frame_bytes
+    //   Enhancement: read + write in-place = 2 * frame_bytes
+    //   Histogram: 1 frame read, negligible write = frame_bytes
+    size_t kernel_bytes_rw = frame_bytes + frame_bytes;  // Sobel and Enhancement
     size_t hist_bytes_r = frame_bytes;
 
     // --- Sobel naive ---
@@ -531,7 +542,7 @@ int main(int argc, char** argv) {
     BenchResult r_enhance = run_inplace_benchmark(
         launch_enhancement,
         d_out, d_in, width, height,
-        enhance_bytes_rw, peak_bw, cpu_enhance_ms,
+        kernel_bytes_rw, peak_bw, cpu_enhance_ms,
         1.2f, 20.0f);
 
     // --- RGB Histogram (uses default stream, allocates internally) ---
