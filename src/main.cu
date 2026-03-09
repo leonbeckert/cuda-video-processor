@@ -260,7 +260,7 @@ public:
             }
 
             // Advance pipeline: next frame becomes current, swap buffer index
-            frame = next_frame;
+            frame = std::move(next_frame);
             have_frame = have_next;
             cur = next;
 

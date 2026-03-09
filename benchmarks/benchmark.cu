@@ -483,7 +483,7 @@ int main(int argc, char** argv) {
     uint8_t* gpu_enhance_out = (uint8_t*)malloc(frame_bytes);
     CUDA_CHECK(cudaMemcpy(gpu_enhance_out, d_enhance_buf, frame_bytes, cudaMemcpyDeviceToHost));
     bool enhance_ok = validate_enhance(gpu_enhance_out, cpu_enhance_buf, width, height);
-    cudaFree(d_enhance_buf);
+    CUDA_CHECK(cudaFree(d_enhance_buf));
 
     // GPU RGB average
     int gpu_r, gpu_g, gpu_b;
@@ -738,8 +738,8 @@ int main(int argc, char** argv) {
         free(cpu_pipeline_out);
         CUDA_CHECK(cudaStreamDestroy(compute_stream));
         CUDA_CHECK(cudaFreeHost(h_out));
-        cudaFree(d_pipeline_in);
-        cudaFree(d_pipeline_out);
+        CUDA_CHECK(cudaFree(d_pipeline_in));
+        CUDA_CHECK(cudaFree(d_pipeline_out));
     }
 
     // Cleanup

@@ -4,7 +4,7 @@
 // via atomicAdd to shared memory (much faster than global atomics), then a
 // single atomicAdd per bin per block merges results into the global histogram.
 // This reduces global atomic contention from 8.3M operations (one per pixel)
-// to ~32K * 25 bins (one per bin per block).
+// to ~1024 * 25 bins (one per bin per block, grid capped at 1024).
 //
 // Template specialization on NUM_BINS lets the compiler size the shared array
 // at compile time, enabling register placement when possible and full unrolling

@@ -12,8 +12,8 @@
 // Strategy: each thread block cooperatively loads a (TILE_W+2) x (TILE_H+2) tile
 // of packed RGBA pixels (uint32) into shared memory, including a 1-pixel halo for
 // the stencil. All channels are loaded in ONE pass — no per-channel iteration.
-// Interior pixels then read all neighbors from shared memory (~100x lower latency
-// than global). This reduces global memory traffic from ~9 reads/pixel to ~1 read/pixel.
+// Interior pixels then read all neighbors from shared memory (~20-30x lower latency
+// than global DRAM on Ampere/Ada). This reduces global memory traffic from ~9 reads/pixel to ~1 read/pixel.
 //
 // Shared memory: 18 x 18 x 4 bytes = 1296 bytes per block (trivial vs 48KB limit).
 

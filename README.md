@@ -13,9 +13,9 @@ Extended from a university GPGPU course assignment. The original project provide
 ## Pipeline Architecture
 
 ```
-FFmpeg Decode ──► cudaMemcpyAsync ──► Sobel Kernel ──► Enhancement ──► Histograms ──► OpenGL Texture ──► Display
-    (CPU)         (Pinned Memory)    (Shared Mem      (In-place)     (Shared         (glTexSubImage2D)
-                   (Stream 1)         Tiling)                         Atomics +
+FFmpeg Decode ──► cudaMemcpyAsync ──► Sobel Kernel ──► Enhancement ──► Histograms ──► cudaMemcpy D2H ──► glTexSubImage2D ──► Display
+    (CPU)         (Pinned H2D)       (Shared Mem      (In-place)     (Shared            (Pinned)          (CPU ► GPU
+                   (Stream 1)         Tiling)                         Atomics +                             texture upload)
                                      (Stream 0)       (Stream 0)     Reduction)
 ```
 
@@ -47,13 +47,13 @@ FFmpeg Decode ──► cudaMemcpyAsync ──► Sobel Kernel ──► Enhance
 
 **Impact:** Improves throughput (FPS) without changing individual kernel latency.
 
-### Histogram with Shared Atomics
+### Brightness Histogram — Shared Memory Privatization
 
-Each thread block maintains a private histogram in shared memory using `atomicAdd`. After all pixels are processed, a single `atomicAdd` per bin merges the block result into global memory. This reduces global atomic contention from millions of operations (one per pixel) to thousands (one per bin per block).
+Each thread block maintains a private histogram in shared memory using `atomicAdd`. After all pixels are processed, a single `atomicAdd` per bin merges the block result into global memory. This reduces global atomic contention from millions of operations (one per pixel) to thousands (one per bin per block). The kernel uses `template<int NUM_BINS>` for compile-time bin count, enabling register placement and full unrolling of bin-mapping arithmetic.
 
-### Brightness Histogram Template Specialization
+### RGB Histogram — Parallel Reduction
 
-The brightness histogram kernel uses a `template<int NUM_BINS>` parameter for compile-time bin count. This allows the compiler to place the shared histogram array in registers when possible and fully unroll bin-mapping arithmetic.
+The RGB average kernel uses a different pattern: block-level parallel reduction with `__syncthreads` barriers to compute per-channel sums, then a final device-to-host copy of the 3-element result. No shared-memory privatization needed since the output is a single average per channel, not a distribution.
 
 ## Performance
 
@@ -109,12 +109,12 @@ CPU baseline: single-threaded x86 on the same machine. GPU numbers are median of
 
 ### Correctness Validation
 
-All kernels pass exact correctness checks (max per-pixel error = 0) against CPU reference implementations.
+All kernels pass correctness checks against CPU reference implementations. Sobel and enhancement allow a max per-pixel error of 1 due to floating-point rounding differences between CPU and GPU `sqrtf` implementations. Histogram kernels match exactly.
 
 ## Building
 
 ### Prerequisites
-- CUDA Toolkit 11.0+
+- CUDA Toolkit 11.8+ (required for SM 89 / Ada Lovelace)
 - CMake 3.18+
 - FFmpeg development libraries (`libavformat-dev libavcodec-dev libavutil-dev libswscale-dev`)
 - OpenGL, GLFW, GLEW (GLFW and GLEW are fetched automatically by CMake)

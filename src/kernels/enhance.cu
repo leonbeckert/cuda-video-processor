@@ -1,10 +1,9 @@
 // --- Per-pixel contrast/brightness enhancement (in-place) ---
 //
-// Purely memory-bound: each pixel reads 3 bytes, applies a multiply-add,
-// and writes 3 bytes back. No data reuse between pixels, so shared memory
+// Purely memory-bound: each pixel reads and writes a 4-byte RGBA word, only
+// modifying R/G/B channels. No data reuse between pixels, so shared memory
 // tiling would add overhead without benefit (unlike Sobel where neighboring
-// threads read overlapping data). Achieves ~76% peak memory bandwidth on the
-// RTX 3090 — close to the hardware limit for a simple element-wise kernel.
+// threads read overlapping data).
 
 #include "enhance.cuh"
 #include <cuda_runtime.h>
